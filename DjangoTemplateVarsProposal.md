@@ -50,6 +50,30 @@ For context, **Jinja2** raises an `UndefinedError` by default when variables are
 
 The core implementation requires modifying the engine initialization, intercepting variable resolution logic, parsing new syntax markers, and creating a new template node. Below is the exact step-by-step technical plan for integrating this into Django's core without regressions.
 
+### Django Template Resolution Architecture
+
+```mermaid
+flowchart TD
+    A[Template Compilation] --> B(Parser tokenizes variables)
+    B --> C{Token suffix?}
+    C -- "Ends with !" --> D["FilterExpression: is_required = True"]
+    C -- "Ends with ?" --> E["FilterExpression: is_optional = True"]
+    C -- None --> F["FilterExpression: Defaults"]
+
+    D & E & F --> G{"Variable.resolve(context)"}
+    
+    G -- Success --> H["Render Output"]
+    G -- VariableDoesNotExist --> I{FilterExpression Flags}
+    
+    I -- is_required --> J["Raise Exception"]
+    I -- is_optional --> K["Return empty string"]
+    I -- default --> L{"Engine settings mode?"}
+    
+    L -- raise --> M["Raise Exception"]
+    L -- warn --> N["Emit Warning & Return empty string"]
+    L -- silent --> O["Return empty string"]
+```
+
 ### Phase 1: Engine-Wide `string_if_invalid_mode`
 
 **1. Modifying Engine Initialization (`django/template/engine.py`)**
@@ -78,6 +102,19 @@ class TemplateVariableWarning(UserWarning):
 ```
 
 **3. Intercepting Variable Resolution (`django/template/base.py`)**
+
+```mermaid
+flowchart LR
+    A["Variable._resolve_lookup"] --> B{Lookup Succeeds?}
+    B -- Yes --> C["Return Value"]
+    B -- No --> D{Catch Exception}
+    D -- VariableDoesNotExist --> E{"engine.mode"}
+    E -- silent --> F["return string_if_invalid"]
+    E -- warn --> G["warnings.warn() & return string_if_invalid"]
+    E -- raise --> H["raise VariableDoesNotExist"]
+    D -- Other Exception --> I["raise Exception"]
+```
+
 When `Variable.resolve(context)` fails, it internally raises `VariableDoesNotExist`. Django immediately catches this and returns `string_if_invalid`. I will modify this catch block to branch on the engine mode:
 
 ```python
