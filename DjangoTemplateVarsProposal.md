@@ -80,15 +80,10 @@ flowchart TD
 The `Engine` must accept the new parameterized mode.
 
 ```python
-VALID_INVALID_MODES = {"silent", "warn", "raise"}
-
+# The Engine __init__ will be extended to parse the new keyword argument.
 class Engine:
-    def __init__(self, ..., string_if_invalid='', string_if_invalid_mode='silent', ...):
-        if string_if_invalid_mode not in VALID_INVALID_MODES:
-            raise ImproperlyConfigured(
-                f"string_if_invalid_mode must be 'silent', 'warn', or 'raise'."
-            )
-        self.string_if_invalid = string_if_invalid
+    def __init__(self, ..., string_if_invalid_mode='silent', ...):
+        # Validation logic ensuring mode is 'silent', 'warn', or 'raise'
         self.string_if_invalid_mode = string_if_invalid_mode
 ```
 
@@ -120,25 +115,16 @@ flowchart LR
 When `Variable.resolve(context)` fails, it internally raises `VariableDoesNotExist`. Django immediately catches this and returns `string_if_invalid`. I will modify this catch block to branch on the engine mode:
 
 ```python
+# Pseudocode representation of the interception logic:
 def _resolve_lookup(self, context):
     try:
-        # dict / attr / index lookup chain...
+        # Standard lookup chain sequence...
     except Exception as e:
         if isinstance(e, VariableDoesNotExist):
-            mode = context.template.engine.string_if_invalid_mode
-            
-            if mode == "raise":
-                raise e # Fail fast
-            elif mode == "warn":
-                import warnings
-                warnings.warn(
-                    f"Variable '{self.var}' does not exist.",
-                    category=TemplateVariableWarning,
-                    stacklevel=2,
-                )
-            
-            # "silent" mode and "warn" mode both return the placeholder string
-            return context.template.engine.string_if_invalid
+            # NEW: Branch based on engine.string_if_invalid_mode
+            if mode == "raise": raise e
+            if mode == "warn":  warnings.warn("Missing variable")
+            return placeholder_string
         raise e
 ```
 
@@ -154,19 +140,10 @@ Before the token is split into the base variable and its filters, we inspect the
 ```python
 class FilterExpression:
     def __init__(self, token, parser):
-        self.is_required = False
-        self.is_optional = False
-        
-        raw_var = token.strip()
-        if raw_var.endswith("!"):
-            self.is_required = True
-            raw_var = raw_var[:-1]
-        elif raw_var.endswith("?"):
-            self.is_optional = True
-            raw_var = raw_var[:-1]
-            
-        self.var = Variable(raw_var)
-        # compile filters as normal...
+        # We will parse trailing '!' and '?' markers from the token 
+        # and set internal flags before passing the rest to Variable.
+        self.is_required = token.endswith("!")
+        self.is_optional = token.endswith("?")
 ```
 
 **2. Short-Circuiting the Exception**
@@ -174,19 +151,10 @@ When resolving, the explicit flags override the engine-wide setting:
 
 ```python
 def resolve(self, context, ignore_failures=False):
-    try:
-        value = self.var.resolve(context)
-    except VariableDoesNotExist:
-        if ignore_failures:
-            return context.template.engine.string_if_invalid
-            
-        if self.is_required:
-            raise  # Always raise for {{ var! }}
-            
-        if self.is_optional:
-            return "" # Always silent for {{ var? }}
-            
-        # Fallback to engine-wide settings (already handled by Variable.resolve)
+    # During exception handling, local flags take precedence over the engine defaults.
+    if self.is_required: raise
+    if self.is_optional: return ""
+    # Else fallback to default engine intercept...
 ```
 
 ---
@@ -199,22 +167,11 @@ To enforce strict validation at the top of a template (e.g. for API response gen
 
 ```python
 class RequiredVarsNode(Node):
-    def __init__(self, filter_expressions):
-        self.filter_expressions = filter_expressions
-
     def render(self, context):
-        missing = []
-        for expr in self.filter_expressions:
-            try:
-                expr.resolve(context)
-            except VariableDoesNotExist:
-                missing.append(expr.token)
-                
-        if missing:
-            raise VariableDoesNotExist(
-                f"Required template variables not found: {', '.join(missing)}"
-            )
-        return "" # Validates but renders nothing
+        # Loops over all requested context variables.
+        # If any fail to resolve, they are grouped and a single 
+        # VariableDoesNotExist exception is raised listing all missing keys.
+        return "" # Validates context but renders nothing to the DOM
 ```
 
 ---
@@ -271,29 +228,13 @@ All features will be verified with the standard Django `pytest` harness. A sampl
 
 ```python
 # tests/template_tests/test_missing_vars.py
-from django.template import Engine, Context, VariableDoesNotExist
-import warnings, pytest
 
-def test_warn_mode_issues_warning():
-    engine = Engine(string_if_invalid_mode="warn")
-    tmpl = engine.from_string("Hello {{ missing }}")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter('always')
-        tmpl.render(Context({}))
-        assert "missing" in str(w[-1].message)
-
-def test_required_flag_overrides_silent_engine():
-    engine = Engine(string_if_invalid_mode="silent")
-    tmpl = engine.from_string("{{ invoice.total_amount! }}")
-    with pytest.raises(VariableDoesNotExist):
-        tmpl.render(Context({}))
-
-def test_required_vars_tag_bulk_failure():
-    engine = Engine()
-    tmpl = engine.from_string("{% required_vars user invoice %}")
-    with pytest.raises(VariableDoesNotExist) as exc:
-        tmpl.render(Context({}))
-    assert "user" in str(exc.value) and "invoice" in str(exc.value)
+# The new test suite will exhaustively cover execution branches:
+def test_warn_mode_issues_warning(): ...
+def test_raise_mode_fails_fast(): ...
+def test_required_flag_overrides_silent_engine(): ...
+def test_optional_flag_overrides_raise_engine(): ...
+def test_required_vars_tag_bulk_failure(): ...
 ```
 
 ---
