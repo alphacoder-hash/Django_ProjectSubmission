@@ -103,6 +103,8 @@ class TemplateVariableWarning(UserWarning):
 
 **3. Intercepting Variable Resolution (`django/template/base.py`)**
 
+![IDE Screenshot showing the exact location in django/template/base.py where VariableDoesNotExist is intercepted](images/django_code_highlight.png)
+
 ```mermaid
 flowchart LR
     A["Variable._resolve_lookup"] --> B{Lookup Succeeds?}
